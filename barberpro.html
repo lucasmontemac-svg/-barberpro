@@ -494,11 +494,21 @@ function showAuthAlert(msg, type = 'error') {
 }
 
 async function doLogin() {
-  const email = document.getElementById('login-email').value.trim();
+  const email = document.getElementById('login-email').value.trim().toLowerCase();
   const pass  = document.getElementById('login-password').value;
   if (!email || !pass) return showAuthAlert('Preencha todos os campos.');
   try {
-    const data = await sbAuth('/token?grant_type=password', { email, password: pass });
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_KEY}`
+      },
+      body: JSON.stringify({ email, password: pass })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error_description || data.msg || data.error || 'Erro de autenticação');
     currentUser = { access_token: data.access_token, refresh_token: data.refresh_token, email, id: data.user?.id };
     localStorage.setItem('bp_session', JSON.stringify(currentUser));
     await afterLogin();
