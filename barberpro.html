@@ -598,7 +598,7 @@ async function loadBarbearia() {
     const { data: rows } = await sbClient.from('bp_barbearias').select('*').eq('user_id', currentUser.id);
     currentBarbearia = rows?.[0] || null;
     document.getElementById('sidebar-tenant').textContent = currentBarbearia?.nome || 'Sem barbearia';
-  } catch { currentBarbearia = null; }
+  } catch(e) { console.warn('loadBarbearia:', e); currentBarbearia = null; }
 }
 
 // ════════════════ NAVIGATION ════════════════
@@ -758,8 +758,9 @@ async function saveBarbearia() {
     if (currentBarbearia?.id) {
       await sbClient.from('bp_barbearias').update(payload).eq('id', currentBarbearia.id);
     } else {
-      const { data: rows } = await sbClient.from('bp_barbearias').insert(payload).select();
-      currentBarbearia = rows[0];
+      const { data: rows, error: insErr } = await sbClient.from('bp_barbearias').insert(payload).select();
+      if (insErr) throw new Error(insErr.message);
+      currentBarbearia = rows?.[0] || null;
     }
     await loadBarbearia();
     document.getElementById('barb-alert').innerHTML = `<div class="alert alert-success">Salvo com sucesso!</div>`;
