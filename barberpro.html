@@ -436,18 +436,65 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 // ════════════════ CONFIG ════════════════
 const SUPABASE_URL = 'https://eckrbeskzgjvforyyeja.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVja3JiZXNremdqdmZvcnl5ZWphIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExMDc1MDUsImV4cCI6MjA5NjY4MzUwNX0.yognZiAe75g1dmh0ynYoGoo8bnXMpw8k6Z1B_uIDD2E';
 
+const sbClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
 let currentUser = null;
 let currentBarbearia = null;
 let currentPage = 'dashboard';
 
-// ── SUPABASE FETCH ──
-async function sb(path, opts = {}) {
-  const token = currentUser?.access_token || SUPABASE_KEY;
+// ── SUPABASE HELPER ──
+async function sb(table, action = 'select', payload = null, filter = null) {
+  let query = sbClient.from(table);
+  if (action === 'select') {
+    query = query.select(payload || '*');
+    if (filter) {
+      for (const [col, val] of Object.entries(filter)) {
+        query = query.eq(col, val);
+      }
+    }
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    return data;
+  }
+  if (action === 'insert') {
+    const { data, error } = await query.insert(payload).select();
+    if (error) throw new Error(error.message);
+    return data;
+  }
+  if (action === 'update') {
+    let q = query.update(payload);
+    if (filter) {
+      for (const [col, val] of Object.entries(filter)) {
+        q = q.eq(col, val);
+      }
+    }
+    const { error } = await q;
+    if (error) throw new Error(error.message);
+    return null;
+  }
+  if (action === 'delete') {
+    let q = query.delete();
+    if (filter) {
+      for (const [col, val] of Object.entries(filter)) {
+        q = q.eq(col, val);
+      }
+    }
+    const { error } = await q;
+    if (error) throw new Error(error.message);
+    return null;
+  }
+}
+
+// REST direto (para casos específicos)
+async function sbRest(path, opts = {}) {
+  const { data: { session } } = await sbClient.auth.getSession();
+  const token = session?.access_token || SUPABASE_KEY;
   const headers = {
     'apikey': SUPABASE_KEY,
     'Authorization': `Bearer ${token}`,
@@ -475,15 +522,10 @@ async function sbAuth(path, body) {
 
 // ── INIT ──
 window.addEventListener('DOMContentLoaded', async () => {
-  const stored = localStorage.getItem('bp_session');
-  if (stored) {
-    try {
-      const session = JSON.parse(stored);
-      // Verify token still valid
-      const user = await sb('/auth/v1/user', { headers: { 'Authorization': `Bearer ${session.access_token}` } });
-      currentUser = { ...session, email: user.email, id: user.id };
-      await afterLogin();
-    } catch { localStorage.removeItem('bp_session'); }
+  const { data: { session } } = await sbClient.auth.getSession();
+  if (session) {
+    currentUser = { access_token: session.access_token, refresh_token: session.refresh_token, email: session.user.email, id: session.user.id };
+    await afterLogin();
   }
 });
 
@@ -499,18 +541,9 @@ async function doLogin() {
   const pass  = document.getElementById('login-password').value;
   if (!email || !pass) return showAuthAlert('Preencha todos os campos.');
   try {
-    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
-      method: 'POST',
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_KEY}`
-      },
-      body: JSON.stringify({ email, password: pass })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error_description || data.msg || data.error || 'Erro de autenticação');
-    currentUser = { access_token: data.access_token, refresh_token: data.refresh_token, email, id: data.user?.id };
+    const { data, error } = await sbClient.auth.signInWithPassword({ email, password: pass });
+    if (error) throw new Error(error.message);
+    currentUser = { access_token: data.session.access_token, refresh_token: data.session.refresh_token, email, id: data.user.id };
     localStorage.setItem('bp_session', JSON.stringify(currentUser));
     await afterLogin();
   } catch(e) { showAuthAlert(e.message); }
@@ -519,6 +552,7 @@ async function doLogin() {
 
 
 async function doLogout() {
+  await sbClient.auth.signOut();
   localStorage.removeItem('bp_session');
   currentUser = null; currentBarbearia = null;
   document.getElementById('app').classList.remove('visible');
@@ -528,10 +562,7 @@ async function doLogout() {
 async function afterLogin() {
   // Valida se o usuário tem BarberPro habilitado
   try {
-    const profileRes = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${currentUser.id}&select=barber_habilitado,name,status`, {
-      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${currentUser.access_token}` }
-    });
-    const profiles = await profileRes.json();
+    const { data: profiles } = await sbClient.from('profiles').select('barber_habilitado,name,status').eq('id', currentUser.id);
     const profile = profiles?.[0];
 
     if (profile && profile.barber_habilitado === false) {
@@ -564,7 +595,7 @@ async function afterLogin() {
 // ════════════════ BARBEARIA ════════════════
 async function loadBarbearia() {
   try {
-    const rows = await sb(`/rest/v1/bp_barbearias?user_id=eq.${currentUser.id}&select=*`);
+    const { data: rows } = await sbClient.from('bp_barbearias').select('*').eq('user_id', currentUser.id);
     currentBarbearia = rows?.[0] || null;
     document.getElementById('sidebar-tenant').textContent = currentBarbearia?.nome || 'Sem barbearia';
   } catch { currentBarbearia = null; }
@@ -616,11 +647,12 @@ async function ensureTables() {
 async function renderDashboard() {
   const content = document.getElementById('content');
   try {
-    const [agends, caixaEntradas, caixaSaidas] = await Promise.all([
-      sb(`/rest/v1/bp_agendamentos?barbearia_id=eq.${currentBarbearia.id}&select=*`),
-      sb(`/rest/v1/bp_caixa?barbearia_id=eq.${currentBarbearia.id}&tipo=eq.entrada&select=valor`),
-      sb(`/rest/v1/bp_caixa?barbearia_id=eq.${currentBarbearia.id}&tipo=eq.saida&select=valor`)
+    const [ra, re, rs] = await Promise.all([
+      sbClient.from('bp_agendamentos').select('*').eq('barbearia_id', currentBarbearia.id),
+      sbClient.from('bp_caixa').select('valor').eq('barbearia_id', currentBarbearia.id).eq('tipo', 'entrada'),
+      sbClient.from('bp_caixa').select('valor').eq('barbearia_id', currentBarbearia.id).eq('tipo', 'saida')
     ]);
+    const agends = ra.data || []; const caixaEntradas = re.data || []; const caixaSaidas = rs.data || [];
 
     const hoje = new Date().toISOString().split('T')[0];
     const agHoje = agends.filter(a => a.data === hoje);
@@ -724,14 +756,9 @@ async function saveBarbearia() {
   if (!payload.nome) return alert('Nome obrigatório');
   try {
     if (currentBarbearia?.id) {
-      await sb(`/rest/v1/bp_barbearias?id=eq.${currentBarbearia.id}`, {
-        method: 'PATCH', body: JSON.stringify(payload)
-      });
+      await sbClient.from('bp_barbearias').update(payload).eq('id', currentBarbearia.id);
     } else {
-      const rows = await sb('/rest/v1/bp_barbearias', {
-        method: 'POST', body: JSON.stringify(payload),
-        headers: { 'Prefer': 'return=representation' }
-      });
+      const { data: rows } = await sbClient.from('bp_barbearias').insert(payload).select();
       currentBarbearia = rows[0];
     }
     await loadBarbearia();
@@ -747,7 +774,7 @@ async function renderBarbeiros() {
   document.getElementById('topbar-actions').innerHTML =
     `<button class="btn btn-primary" onclick="openBarbeiroModal()">+ Novo Barbeiro</button>`;
   try {
-    const rows = await sb(`/rest/v1/bp_barbeiros?barbearia_id=eq.${currentBarbearia.id}&order=nome`);
+    const { data: rows } = await sbClient.from('bp_barbeiros').select('*').eq('barbearia_id', currentBarbearia.id).order('nome');
     content.innerHTML = `
       <div class="card">
         <div class="table-wrap">
@@ -798,15 +825,15 @@ async function saveBarbeiro(id) {
   };
   if (!payload.nome) return alert('Nome obrigatório');
   try {
-    if (id) await sb(`/rest/v1/bp_barbeiros?id=eq.${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
-    else await sb('/rest/v1/bp_barbeiros', { method: 'POST', body: JSON.stringify(payload) });
+    if (id) await sbClient.from('bp_barbeiros').update(payload).eq('id', id);
+    else await sbClient.from('bp_barbeiros').insert(payload);
     closeModal(); renderBarbeiros();
   } catch(e) { alert(e.message); }
 }
 
 async function deleteBarbeiro(id) {
   if (!confirm('Excluir barbeiro?')) return;
-  await sb(`/rest/v1/bp_barbeiros?id=eq.${id}`, { method: 'DELETE' });
+  await sbClient.from('bp_barbeiros').delete().eq('id', id);
   closeModal(); renderBarbeiros();
 }
 
@@ -816,7 +843,7 @@ async function renderServicos() {
   document.getElementById('topbar-actions').innerHTML =
     `<button class="btn btn-primary" onclick="openServicoModal()">+ Novo Serviço</button>`;
   try {
-    const rows = await sb(`/rest/v1/bp_servicos?barbearia_id=eq.${currentBarbearia.id}&order=nome`);
+    const { data: rows } = await sbClient.from('bp_servicos').select('*').eq('barbearia_id', currentBarbearia.id).order('nome');
     content.innerHTML = `
       <div class="card">
         <div class="table-wrap">
@@ -871,15 +898,15 @@ async function saveServico(id) {
   };
   if (!payload.nome) return alert('Nome obrigatório');
   try {
-    if (id) await sb(`/rest/v1/bp_servicos?id=eq.${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
-    else await sb('/rest/v1/bp_servicos', { method: 'POST', body: JSON.stringify(payload) });
+    if (id) await sbClient.from('bp_servicos').update(payload).eq('id', id);
+    else await sbClient.from('bp_servicos').insert(payload);
     closeModal(); renderServicos();
   } catch(e) { alert(e.message); }
 }
 
 async function deleteServico(id) {
   if (!confirm('Excluir serviço?')) return;
-  await sb(`/rest/v1/bp_servicos?id=eq.${id}`, { method: 'DELETE' });
+  await sbClient.from('bp_servicos').delete().eq('id', id);
   closeModal(); renderServicos();
 }
 
@@ -889,7 +916,7 @@ async function renderClientes() {
   document.getElementById('topbar-actions').innerHTML =
     `<button class="btn btn-primary" onclick="openClienteModal()">+ Novo Cliente</button>`;
   try {
-    const rows = await sb(`/rest/v1/bp_clientes?barbearia_id=eq.${currentBarbearia.id}&order=nome`);
+    const { data: rows } = await sbClient.from('bp_clientes').select('*').eq('barbearia_id', currentBarbearia.id).order('nome');
     content.innerHTML = `
       <div class="card">
         <div class="table-wrap">
@@ -937,15 +964,15 @@ async function saveCliente(id) {
   };
   if (!payload.nome) return alert('Nome obrigatório');
   try {
-    if (id) await sb(`/rest/v1/bp_clientes?id=eq.${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
-    else await sb('/rest/v1/bp_clientes', { method: 'POST', body: JSON.stringify(payload) });
+    if (id) await sbClient.from('bp_clientes').update(payload).eq('id', id);
+    else await sbClient.from('bp_clientes').insert(payload);
     closeModal(); renderClientes();
   } catch(e) { alert(e.message); }
 }
 
 async function deleteCliente(id) {
   if (!confirm('Excluir cliente?')) return;
-  await sb(`/rest/v1/bp_clientes?id=eq.${id}`, { method: 'DELETE' });
+  await sbClient.from('bp_clientes').delete().eq('id', id);
   closeModal(); renderClientes();
 }
 
@@ -966,11 +993,12 @@ async function renderAgenda() {
     <button class="btn btn-primary" onclick="openAgendamentoModal()">+ Agendar</button>`;
 
   try {
-    [agendaBarbeiros, agendaServicos, agendaClientes] = await Promise.all([
-      sb(`/rest/v1/bp_barbeiros?barbearia_id=eq.${currentBarbearia.id}&ativo=eq.true&order=nome`),
-      sb(`/rest/v1/bp_servicos?barbearia_id=eq.${currentBarbearia.id}&ativo=eq.true&order=nome`),
-      sb(`/rest/v1/bp_clientes?barbearia_id=eq.${currentBarbearia.id}&order=nome`)
+    const [r1, r2, r3] = await Promise.all([
+      sbClient.from('bp_barbeiros').select('*').eq('barbearia_id', currentBarbearia.id).eq('ativo', true).order('nome'),
+      sbClient.from('bp_servicos').select('*').eq('barbearia_id', currentBarbearia.id).eq('ativo', true).order('nome'),
+      sbClient.from('bp_clientes').select('*').eq('barbearia_id', currentBarbearia.id).order('nome')
     ]);
+    agendaBarbeiros = r1.data || []; agendaServicos = r2.data || []; agendaClientes = r3.data || [];
     renderAgendaGrid();
   } catch(e) { content.innerHTML = `<div class="alert alert-error">${e.message}</div>${sqlGuide()}`; }
 }
@@ -980,9 +1008,7 @@ async function renderAgendaGrid() {
   const dateStr = agendaDate.toISOString().split('T')[0];
   document.getElementById('agenda-date-label').textContent = fmtDate(dateStr);
 
-  const agendamentos = await sb(
-    `/rest/v1/bp_agendamentos?barbearia_id=eq.${currentBarbearia.id}&data=eq.${dateStr}&select=*`
-  );
+  const { data: agendamentos } = await sbClient.from('bp_agendamentos').select('*').eq('barbearia_id', currentBarbearia.id).eq('data', dateStr);
 
   const b = currentBarbearia;
   const slots = generateSlots(b.hora_abertura||'08:00', b.hora_fechamento||'20:00', b.intervalo_min||30);
@@ -1118,17 +1144,14 @@ async function saveAgendamento(id) {
     // Busca status anterior (para detectar transição para "concluido")
     let statusAnterior = null;
     if (id) {
-      const rows = await sb(`/rest/v1/bp_agendamentos?id=eq.${id}&select=status,sincronizado_gcp`);
+      const { data: rows } = await sbClient.from('bp_agendamentos').select('status,sincronizado_gcp').eq('id', id);
       statusAnterior = rows?.[0]?.status;
       payload.sincronizado_gcp = rows?.[0]?.sincronizado_gcp || false;
     }
 
-    if (id) await sb(`/rest/v1/bp_agendamentos?id=eq.${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
+    if (id) await sbClient.from('bp_agendamentos').update(payload).eq('id', id);
     else {
-      const novo = await sb('/rest/v1/bp_agendamentos', {
-        method: 'POST', body: JSON.stringify(payload),
-        headers: { 'Prefer': 'return=representation' }
-      });
+      const { data: novo } = await sbClient.from('bp_agendamentos').insert(payload).select();
       id = novo?.[0]?.id;
     }
 
@@ -1170,16 +1193,10 @@ async function sincronizarComGCP(agendamento, agendamentoId) {
       valor_bruto: agendamento.valor || 0
     };
 
-    await sb('/rest/v1/vendas', {
-      method: 'POST',
-      body: JSON.stringify(vendaGCP)
-    });
+    await sbClient.from('vendas').insert(vendaGCP);
 
     // Marca agendamento como sincronizado
-    await sb(`/rest/v1/bp_agendamentos?id=eq.${agendamentoId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ sincronizado_gcp: true })
-    });
+    await sbClient.from('bp_agendamentos').update({ sincronizado_gcp: true }).eq('id', agendamentoId);
 
     showToast('✅ Receita sincronizada com Gestão Comercial Pro!');
   } catch(e) {
@@ -1205,7 +1222,7 @@ function showToast(msg, type = 'success') {
 
 async function deleteAgendamento(id) {
   if (!confirm('Excluir agendamento?')) return;
-  await sb(`/rest/v1/bp_agendamentos?id=eq.${id}`, { method: 'DELETE' });
+  await sbClient.from('bp_agendamentos').delete().eq('id', id);
   closeModal(); renderAgendaGrid();
 }
 
@@ -1215,9 +1232,7 @@ async function renderCaixa() {
   document.getElementById('topbar-actions').innerHTML =
     `<button class="btn btn-primary" onclick="openCaixaModal()">+ Lançamento</button>`;
   try {
-    const rows = await sb(
-      `/rest/v1/bp_caixa?barbearia_id=eq.${currentBarbearia.id}&order=data.desc,created_at.desc`
-    );
+    const { data: rows } = await sbClient.from('bp_caixa').select('*').eq('barbearia_id', currentBarbearia.id).order('data', {ascending: false}).order('created_at', {ascending: false});
     const entradas = rows.filter(r=>r.tipo==='entrada').reduce((s,r)=>s+parseFloat(r.valor||0),0);
     const saidas   = rows.filter(r=>r.tipo==='saida').reduce((s,r)=>s+parseFloat(r.valor||0),0);
     const saldo = entradas - saidas;
@@ -1299,15 +1314,15 @@ async function saveCaixa(id) {
   if (!payload.descricao) return alert('Descrição obrigatória');
   if (!payload.valor) return alert('Valor inválido');
   try {
-    if (id) await sb(`/rest/v1/bp_caixa?id=eq.${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
-    else await sb('/rest/v1/bp_caixa', { method: 'POST', body: JSON.stringify(payload) });
+    if (id) await sbClient.from('bp_caixa').update(payload).eq('id', id);
+    else await sbClient.from('bp_caixa').insert(payload);
     closeModal(); renderCaixa();
   } catch(e) { alert(e.message); }
 }
 
 async function deleteCaixa(id) {
   if (!confirm('Excluir lançamento?')) return;
-  await sb(`/rest/v1/bp_caixa?id=eq.${id}`, { method: 'DELETE' });
+  await sbClient.from('bp_caixa').delete().eq('id', id);
   closeModal(); renderCaixa();
 }
 
